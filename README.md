@@ -17,4 +17,4 @@ library(tidyr)
 ```
 
 # Script
-For more information about the script open the file "In vivo statistical analysis"
+For more information about the R script used for the statistical analysis, open the file "In vivo statistical analysis"
