@@ -1,0 +1,275 @@
+---
+title: "In vivo statistical analysis Figure 3"
+author: "Vincent Pappalardo"
+date: "2025-09-30"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc_float: true
+    toc: true
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(emmeans)
+library(forcats)
+library(ggplot2)
+library(multcomp)
+library(nlme)
+library(readxl)
+library(stringr)
+library(survival)
+library(survminer)
+library(tidyr)
+```
+
+# Loading and preprocessing
+
+Tumor-growth data were analyzed using a linear mixed-effects model (http://dx.doi.org/10.1007/b98882)
+fitted by Restricted Maximum Likelihood (REML) to evaluate the treatment effects over time. Tumor
+volumes were normalized relative to baseline measurements to correct for initial tumor-size differences and
+then log-transformed to model the natural exponential growth of tumor. The model incorporated fixed
+effects for the time, the interaction between time and treatment/cell line as well as the interaction between the three to assess differential temporal dynamics between groups. Individual animal variability was accounted by adding a random intercept for each mouse.
+The significance level was set at 0.05. All statistical analyses were performed using R (version 4.3.2), using
+the nlme package (version 3.1-164) to fit the mixed-effect model. After the models were fitted, the slopes
+of the tumor growth curves and their respectives confidence intervals were computed using the emmeans
+package (version 1Lenth R (2025). emmeans: Estimated Marginal Means, aka Least-Squares Means. R
+package version 1.11.1-00001.10.2, ).
+
+```{r}
+data <- read_excel("data/LSS_invivo_2.xlsx", sheet = "tumorsize")
+data_surv <- read_excel("data/LSS_invivo_2.xlsx", sheet = "Sheet1")
+```
+
+```{r}
+data2 <-data %>% separate(
+    Group,
+    into = c("cell_line", "treatment"),
+    sep = "\\s*[._-]?\\s*(?=(?:vehicule|vehicle|GSK)$)",
+    remove = FALSE,
+    extra = "merge",
+    fill = "right"
+  ) %>%
+  
+mutate(treatment = ifelse(treatment == "vehicule", "vehicle", treatment))
+data2$treatment[is.na(data2$treatment)] <- "vehicle"
+
+data2$cell_line <- as.factor(data2$cell_line)
+data2$ID <- as.factor(data2$ID)
+data2$treatment <- as.factor(data2$treatment)
+
+```
+
+```{r}
+data2 <- data2 %>%  group_by(ID) %>%                        # Group by mouse ID
+  arrange(Day) %>%                           # Ensure data is ordered by date for each mouse
+  mutate(first_volume = first(Size),          # Get the first tumor volume for each mouse
+         normalized_volume = Size / first_volume)    # Normalize the tumor volume
+
+data2$cell_line <- sub("^\\s*\\d+\\.\\s*", "", data2$cell_line)
+
+data2 <- droplevels(data2)
+table(data2$cell_line, data2$treatment)
+```
+
+```{r}
+data2$treatment <- factor(data2$treatment, levels = c("vehicle", "GSK"))  # <- and here
+data2$cell_line <- factor(data2$cell_line, levels = c("LSS KO", "Oci-Ly1"))  # <- and here
+```
+
+# EDA
+
+```{r}
+p_1 <- ggplot(data2, aes(x = Day, y = Size, group = ID, color = Group)) +
+  geom_line() +
+  labs(title="Tumor Volume per Animal by Group",
+       x="Day", y="Tumor Volume") +
+  theme_minimal() + theme(legend.position="right")
+
+# plotly::ggplotly(p_1)
+p_1
+```
+
+```{r}
+p_2 <- ggplot(data2, aes(x = Day, y = log(normalized_volume), group = ID, color = Group)) +
+  geom_line() +
+  labs(title="Normalized Tumor Volume per Animal by Group",
+       x="Day", y="Log(Normalized Volume)") +
+  theme_minimal() + theme(legend.position="right")
+
+# plotly::ggplotly(p_2)
+p_2
+```
+
+```{r}
+fit <- lme(
+  fixed = log(normalized_volume) ~ 1 + Day + Day:treatment + Day:cell_line + Day:treatment:cell_line,
+  random = ~ 1 | ID,
+  data   = data2, 
+  method = "REML"
+)
+```
+
+```{r}
+table <- summary(fit)$tTable
+# DT::datatable(round(table, 4))
+print(round(table, 4))
+```
+
+Interpretations:
+
+1) In the control group AND cell-line LSS KO,  the tumor increases on average by 16.5% per day (exp(0.1392) = 1.149).
+2) In the control group AND cell-line Oci_Ly1, the tumor increases on average by 21.7% per day (exp(0.1392 + 0.0585) = 1.219).
+3) In the treated group AND cell-line LSS KO,  the tumor increases on average by 10.6% per day (exp(0.1392 - 0.0377) = 1.107).
+4) In the treated group AND cell-line Oci_Ly1, the tumor increases on average by 20.2% per day (exp(0.1392 - 0.0377 + 0.0585 + 0.0253) = 1.204).
+
+
+```{r}
+# -------------------------------------------------------------------------
+# Build a combined "Group" = treatment × cell_line for plotting & coloring
+# -------------------------------------------------------------------------
+data2$treatment  <- droplevels(factor(data2$treatment))
+data2$cell_line  <- droplevels(factor(data2$cell_line))
+data2$Group      <- interaction(data2$treatment, data2$cell_line, sep = " • ", drop = TRUE)
+
+# --- base spaghetti plot (individual animals) ---
+p_2 <- ggplot(data2, aes(x = Day,
+                         y = log(normalized_volume),
+                         group = ID,                # random-effect unit
+                         color = Group)) +
+  geom_line(alpha = 0.35) +
+  labs(title = "Normalized Tumor Volume per Animal",
+       subtitle = "Colored by treatment × cell line",
+       x = "Day", y = "Log(Normalized Volume)") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# -------------------------------------------------------
+# Population (fixed-effects) lines from the mixed model
+# -------------------------------------------------------
+# prediction grid over Day × treatment × cell_line
+Day_seq <- seq(min(data2$Day, na.rm = TRUE),
+               max(data2$Day, na.rm = TRUE),
+               length.out = 100)
+
+tlev <- levels(data2$treatment)
+clev <- levels(data2$cell_line)
+
+pred_df <- expand.grid(Day = Day_seq,
+                       treatment = tlev,
+                       cell_line = clev,
+                       KEEP.OUT.ATTRS = FALSE,
+                       stringsAsFactors = FALSE)
+
+# create Group in pred_df to match plot mapping
+pred_df$treatment <- factor(pred_df$treatment, levels = tlev)
+pred_df$cell_line <- factor(pred_df$cell_line, levels = clev)
+pred_df$Group     <- interaction(pred_df$treatment, pred_df$cell_line, sep = " • ", drop = TRUE)
+
+# population-level predictions (no random effects)
+pred_df$fit <- as.numeric(predict(fit, newdata = pred_df, level = 0))  # nlme::lme
+
+# --- overlay the lines ---
+p_2_lines <- p_2 +
+  geom_line(data = pred_df,
+            aes(x = Day, y = fit, color = Group, group = Group),
+            linewidth = 1.3,
+            inherit.aes = FALSE) +
+  labs(subtitle = "Solid lines = mixed-model population fits per treatment × cell line")
+
+# show it
+# p_2_lines
+# Optional interactive:
+# plotly::ggplotly(p_2_lines)
+p_2_lines
+```
+
+## Trend pairwise comparison
+
+```{r}
+# 1) Day slopes by treatment × cell_line + pairwise tests (Bonferroni)
+trends <- emtrends(fit, specs = ~ treatment * cell_line, var = "Day")
+pairs_trends <- pairs(trends, adjust = "bonferroni") |> as.data.frame()
+
+pairs_trends[,c(2:6)] <- round(pairs_trends[,c(2:6)], 3)
+
+# DT::datatable(pairs_trends)
+print(pairs_trends)
+```
+
+
+# Survival
+
+```{r}
+# one row per subject
+surv_df <- data2 %>%
+  group_by(ID) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  mutate(
+    treatment = droplevels(factor(treatment)),
+    cell_line = droplevels(factor(cell_line)),
+    Group = interaction(treatment, cell_line, sep = " • ", drop = TRUE),
+    status = 1L                       # all events occurred
+  ) %>%
+  dplyr::select(ID, treatment, cell_line, Day, status, Group)
+
+# Kaplan–Meier (will drop to 0 eventually; no censor ticks)
+surv_obj <- Surv(time = surv_df$Day, event = surv_df$status)
+
+# Cox PH with interaction
+cox_fit <- coxph(surv_obj ~ treatment * cell_line, data = surv_df)
+summary(cox_fit)
+exp(cbind(HR = coef(cox_fit), confint(cox_fit)))
+cox.zph(cox_fit)
+```
+
+```{r}
+
+km_fit <- survfit(surv_obj ~ Group, data = surv_df)
+
+
+# KM (no built-in median lines)
+km_plot <- ggsurvplot(
+  km_fit, data = surv_df, risk.table = TRUE, conf.int = F,
+  pval = TRUE, ggtheme = theme_minimal(),
+  xlab = "Time (days)", ylab = "Survival probability",
+  surv.median.line = "none"
+)
+
+# Per-group medians
+med <- survminer::surv_median(km_fit)  # columns: strata, median, etc.
+
+km_plot$plot <- km_plot$plot +
+  geom_segment(data = med,
+               aes(x = 0, xend = median, y = 0.5, yend = 0.5, color = strata)) +
+  geom_segment(data = med,
+               aes(x = median, xend = median, y = 0.5, yend = 0, color = strata),
+               linetype = "dashed")
+
+print(km_plot)
+```
+
+```{r}
+# 1) Pairwise log-rank tests (BH-adjusted p-values)
+pw_lr <- pairwise_survdiff(Surv(Day, status) ~ Group,
+                           data = surv_df, p.adjust.method = "bonferroni")
+pw_lr$p.value  # matrix of adjusted p-values
+```
+
+# Conclusions:
+
+1) The overall tumor volume increases on average by 16.5% per day.
+2) The cell-line without LSS knocked out have a significantly faster tumor's volume increases.
+3) The treatment have a significant impact ONLY in the LSS KO group. Indeed Vehicle + Oci-Ly1 and GSK + Oci-Ly1 have similar trends.
+4) None of the tested variable hav a significant impact on survival. However, overall comparison show that the 4 groups are significantly different. In particular the pairwise comparison indicates that GSK•Oci-Ly1 differs from GSK•LSS KO. Also, vehicle•Oci-Ly1 and GSK•LSS KO are borderline significant. 
+
+
